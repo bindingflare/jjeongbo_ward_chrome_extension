@@ -1,20 +1,57 @@
 const ANALYZE_ENDPOINT = "https://swai-backend.onrender.com/api/check";
+const PREF_KEY = "preAnalysisPromptEnabled";
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "FOUND_CONSENT" && typeof msg.text === "string") {
+    // Auto/content-script path → page overlay
     handleConsent(msg.text, sender.tab?.id)
       .then(sendResponse)
       .catch((error) => {
         console.error("Consent handling failed", error);
         sendResponse({ error: "processing_failed" });
-      });
+    });
     return true; // keep the message channel open for async response
+  }
+
+  if (msg?.type === "PROMPT_ANALYZE" && typeof msg.text === "string") {
+    // Overlay prompt “Send analysis” action
+    handleConsent(msg.text, sender.tab?.id, { skipPrompt: true })
+      .then(sendResponse)
+      .catch((error) => {
+        console.error("Prompt analysis failed", error);
+        sendResponse({ error: "processing_failed" });
+      });
+    return true;
+  }
+
+  if (msg?.type === "ANALYZE_TEXT_DIRECT" && typeof msg.text === "string") {
+    // Extension popup (inline result) path: no overlay, no prompt
+    directAnalyzeFromPopup(msg.text, msg.tabId)
+      .then(sendResponse)
+      .catch((error) => {
+        console.error("Direct analysis failed", error);
+        sendResponse({ error: "processing_failed" });
+      });
+    return true;
+  }
+
+  if (msg?.type === "GET_CACHED_RESULT" && typeof msg.text === "string") {
+    getCachedResult(msg.text)
+      .then((cachedResult) => sendResponse({ result: cachedResult }))
+      .catch((error) => {
+        console.error("Cache lookup failed", error);
+        sendResponse({ result: null });
+      });
+    return true;
   }
 
   return undefined;
 });
 
-async function handleConsent(text, tabId) {
+async function handleConsent(text, tabId, options = {}) {
+  const skipPrompt = Boolean(options.skipPrompt);
+  const suppressOverlay = Boolean(options.suppressOverlay);
+
   if (!tabId) {
     console.warn("No tabId provided for consent result");
     return { error: "no_tab" };
@@ -23,10 +60,31 @@ async function handleConsent(text, tabId) {
   const cacheKey = await hashText(text);
   const cache = await chrome.storage.local.get(cacheKey);
   const cachedResult = cache[cacheKey];
+  const prefs = await chrome.storage.local.get({ [PREF_KEY]: false });
 
-  if (cachedResult) {
-    await showOverlay(tabId, cachedResult, true);
-    return { source: "cache", result: cachedResult };
+  // Inline/popup-direct path: return cached immediately, bypass prompt/overlay
+  if (suppressOverlay) {
+    if (cachedResult) {
+      return { source: "cache", result: cachedResult };
+    }
+  } else {
+    // Overlay path: honor prompt setting
+    if (prefs[PREF_KEY] && !skipPrompt) {
+      await showOverlay(tabId, { prompt: true, text, cacheAvailable: Boolean(cachedResult) }, false);
+      return { source: "prompt" };
+    }
+
+    if (cachedResult) {
+      await showOverlay(
+        tabId,
+        {
+          ...cachedResult,
+          cacheAvailable: true
+        },
+        true
+      );
+      return { source: "cache", result: cachedResult };
+    }
   }
 
   let result;
@@ -35,13 +93,39 @@ async function handleConsent(text, tabId) {
   } catch (error) {
     console.error("API call failed", error);
     const detail = formatError(error);
-    await showOverlay(tabId, { error: "분석을 실패했습니다.", detail }, false);
+    if (!suppressOverlay) {
+      await showOverlay(tabId, { error: "분석을 실패했습니다.", detail }, false);
+    }
     return { error: "api_error", detail };
   }
 
   await chrome.storage.local.set({ [cacheKey]: result });
-  await showOverlay(tabId, result, false);
+  if (!suppressOverlay) {
+    await showOverlay(tabId, result, false);
+  }
   return { source: "api", result };
+}
+
+async function directAnalyzeFromPopup(text, tabId) {
+  if (!tabId) {
+    return { error: "no_tab" };
+  }
+
+  const cacheKey = await hashText(text);
+  const cache = await chrome.storage.local.get(cacheKey);
+  const cachedResult = cache[cacheKey];
+
+  if (cachedResult) {
+    return { source: "cache", result: cachedResult };
+  }
+
+  return handleConsent(text, tabId, { skipPrompt: true, suppressOverlay: true });
+}
+
+async function getCachedResult(text) {
+  const cacheKey = await hashText(text);
+  const cache = await chrome.storage.local.get(cacheKey);
+  return cache[cacheKey] || null;
 }
 
 async function callRemoteAnalyzer(text) {
@@ -124,7 +208,7 @@ function injectOverlay(payload, fromCache) {
     position: fixed;
     top: 12px;
     left: 12px;
-    max-width: 400px;
+    width: min(260px, 90vw);
     background: #0d1117;
     color: #f0f6fc;
     padding: 14px 16px;
@@ -142,6 +226,22 @@ function injectOverlay(payload, fromCache) {
   title.style.gap = "8px";
   title.textContent = "분석 결과";
 
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "×";
+  closeBtn.style.cssText = `
+    margin-left: auto;
+    padding: 2px 6px;
+    background: transparent;
+    color: inherit;
+    border: none;
+    border-radius: 6px;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1;
+  `;
+  closeBtn.addEventListener("click", () => container.remove());
+
   const pill = document.createElement("span");
   pill.textContent = fromCache ? "캐시" : "실시간";
   pill.style.cssText = `
@@ -156,6 +256,71 @@ function injectOverlay(payload, fromCache) {
     font-weight: 600;
   `;
   title.appendChild(pill);
+  title.appendChild(closeBtn);
+
+  if (payload && payload.prompt) {
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.style.lineHeight = "1.5";
+    // body.textContent = "개인정보 관련 텍스트가 발견되었습니다!";
+
+    const snippetText = (payload.preview || payload.text || "").slice(0, 200);
+    if (snippetText) {
+      const snippet = document.createElement("div");
+      snippet.style.cssText = "margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 11px; line-height: 1.4;";
+      snippet.textContent = snippetText + (payload.text && payload.text.length > snippetText.length ? "…" : "");
+      body.appendChild(snippet);
+    }
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "margin-top: 10px; display: flex; justify-content: flex-end;";
+
+    const sendBtn = document.createElement("button");
+    sendBtn.type = "button";
+    sendBtn.textContent = payload.cacheAvailable ? "결과보기" : "분석하기";
+    sendBtn.style.cssText = `
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.06);
+      color: inherit;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    `;
+
+    // const cancelBtn = document.createElement("button");
+    // cancelBtn.type = "button";
+    // cancelBtn.textContent = "Dismiss";
+    // cancelBtn.style.cssText = `
+    //   padding: 8px 10px;
+    //   background: rgba(255, 255, 255, 0.06);
+    //   color: inherit;
+    //   border: 1px solid rgba(255, 255, 255, 0.12);
+    //   border-radius: 8px;
+    //   font-weight: 600;
+    //   cursor: pointer;
+    // `;
+
+    // cancelBtn.addEventListener("click", () => container.remove());
+
+    sendBtn.addEventListener("click", () => {
+      sendBtn.disabled = true;
+      sendBtn.textContent = payload.cacheAvailable ? "Loading..." : "Sending...";
+      chrome.runtime.sendMessage({ type: "PROMPT_ANALYZE", text: payload.text || "" }, (res) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError || res?.error) {
+          sendBtn.disabled = false;
+          sendBtn.textContent = payload.cacheAvailable ? "Retry" : "Retry send";
+          body.appendChild(document.createTextNode(" 전송에 실패했습니다. 다시 시도해주세요."));
+        }
+      });
+    });
+
+    actions.append(sendBtn);//, cancelBtn);
+    container.append(title, body, actions);
+    document.body.appendChild(container);
+    return;
+  }
 
   if (payload && payload.error) {
     const body = document.createElement("div");
@@ -168,13 +333,11 @@ function injectOverlay(payload, fromCache) {
       detail.textContent = payload.detail;
       container.append(title, body, detail);
       document.body.appendChild(container);
-      setTimeout(() => container.remove(), 5000);
       return;
     }
 
     container.append(title, body);
     document.body.appendChild(container);
-    setTimeout(() => container.remove(), 5000);
     return;
   }
 
@@ -245,8 +408,6 @@ function injectOverlay(payload, fromCache) {
   const normalized = payload && typeof payload === "object" ? payload : {};
   normalized.bullets = Array.isArray(normalized.bullets) ? normalized.bullets : [];
   updateAnalysisUI(normalized);
-
-  setTimeout(() => container.remove(), 6000);
 
   function updateAnalysisUI(result) {
     const resultCardEl = document.getElementById("analysisResult");

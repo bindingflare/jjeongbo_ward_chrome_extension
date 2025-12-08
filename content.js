@@ -6,6 +6,7 @@ const KEYWORDS = [
   "제3자 제공"
 ];
 
+const skipAuto = Boolean(window.__privacy_manual_injection);
 let autoSent = false;
 
 function extractConsentText() {
@@ -31,12 +32,23 @@ function sendConsent(trigger) {
   });
 }
 
-// Auto run once on page load
-sendConsent("auto");
+// Auto run once on page load (unless injected manually for popup scan)
+if (!skipAuto) {
+  sendConsent("auto");
+}
 
-// Allow manual re-scan from the popup
-chrome.runtime.onMessage.addListener((msg) => {
+// Allow manual re-scan and text retrieval from the popup
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "MANUAL_SCAN") {
     sendConsent("manual");
+    return;
   }
+
+  if (msg?.type === "GET_CONSENT_TEXT") {
+    const text = extractConsentText();
+    sendResponse({ text });
+    return true;
+  }
+
+  return undefined;
 });
