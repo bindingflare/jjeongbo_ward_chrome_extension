@@ -1,6 +1,6 @@
-# Privacy Agreement Checker (template)
+# 개인정보와드 크롬 익스텐션
 
-A minimal MV3 Chrome extension that detects 개인정보 동의서 text on a page, sends it to a backend API for analysis, caches the result locally, and shows a small overlay on the page. The popup lets you trigger a manual scan.
+MV3 Chrome extension for 개인정보와드 서비스.
 
 ## Project layout
 - manifest.json
