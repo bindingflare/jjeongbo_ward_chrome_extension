@@ -28,7 +28,7 @@ if (prePromptToggle) {
 
 if (clearCacheButton && cacheStatus) {
   clearCacheButton.addEventListener("click", () => {
-    cacheStatus.textContent = "Clearing cache…";
+    cacheStatus.textContent = "Clearing cache...";
     chrome.storage.local.clear(() => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
@@ -95,6 +95,7 @@ scanButton.addEventListener("click", async () => {
     if (!lastErr && cached) {
       statusEl.textContent = "Cached result shown below.";
       renderInlineResult(cached, true);
+      hideScanButton();
       scanButton.disabled = false;
       return;
     }
@@ -113,6 +114,7 @@ scanButton.addEventListener("click", async () => {
         if (result) {
           statusEl.textContent = "Result ready below.";
           renderInlineResult(result, analysisRes.source === "cache");
+          hideScanButton();
         } else {
           statusEl.textContent = "No result returned.";
         }
@@ -138,6 +140,7 @@ async function showCachedIfAvailable() {
     if (!lastErr && cached) {
       statusEl.textContent = "Cached result shown below.";
       renderInlineResult(cached, true);
+      hideScanButton();
     }
   });
 }
@@ -319,4 +322,10 @@ function renderInlineResult(result, fromCache) {
 
   const target = Math.max(0, Math.min(100, Number(result.score) || 0));
   fill.style.height = `${target}%`;
+}
+
+function hideScanButton() {
+  if (scanButton) {
+    scanButton.style.display = "none";
+  }
 }
