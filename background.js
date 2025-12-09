@@ -1,5 +1,6 @@
 const ANALYZE_ENDPOINT = "https://swai-backend.onrender.com/api/check";
 const ANALYZE_SUMMARY_ENDPOINT = "https://swai-backend.onrender.com/api/checkSummary";
+const FRONTEND_FALLBACK = "https://gaeinjjeongbo.netlify.app/analysis-result";
 const SUMMARY_TEXT_LIMIT = 200;
 const PREF_KEY = "preAnalysisPromptEnabled";
 const FREE_MODE_KEY = "freeVersionEnabled";
@@ -66,6 +67,11 @@ async function handleConsent(text, tabId, options = {}) {
   const suppressOverlay = Boolean(options.suppressOverlay);
   const explicitUseSummary = options.useSummary;
 
+  // Always clear any stale overlay before proceeding
+  if (tabId) {
+    await removeOverlay(tabId);
+  }
+
   if (!tabId) {
     console.warn("No tabId provided for consent result");
     return { error: "no_tab" };
@@ -86,7 +92,7 @@ async function handleConsent(text, tabId, options = {}) {
       ? {
           mode: cachedResultRaw.mode || desiredMode,
           summary: "",
-          fullLink: "",
+          fullLink: sanitizeLink(cachedResultRaw.fullLink, desiredMode === "free"),
           ...cachedResultRaw
         }
       : null;
@@ -108,14 +114,14 @@ async function handleConsent(text, tabId, options = {}) {
     }
 
     if (cachedResult) {
-      await showOverlay(
-        tabId,
-        {
+      if (Number(cachedResult.score) !== 0) {
+        const safeCached = {
           ...cachedResult,
+          fullLink: sanitizeLink(cachedResult.fullLink, desiredMode === "free"),
           cacheAvailable: true
-        },
-        true
-      );
+        };
+        await showOverlay(tabId, safeCached, true);
+      }
       return { source: "cache", result: cachedResult };
     }
   }
@@ -134,7 +140,11 @@ async function handleConsent(text, tabId, options = {}) {
 
   await chrome.storage.local.set({ [cacheKey]: result });
   if (!suppressOverlay) {
-    await showOverlay(tabId, result, false);
+    if (Number(result.score) === 0) {
+      await removeOverlay(tabId);
+    } else {
+      await showOverlay(tabId, result, false);
+    }
   }
   return { source: "api", result };
 }
@@ -153,7 +163,7 @@ async function directAnalyzeFromPopup(text, tabId, useSummary) {
     const normalized = {
       mode: cachedResult.mode || desiredMode,
       summary: "",
-      fullLink: "",
+      fullLink: sanitizeLink(cachedResult.fullLink, desiredMode === "free"),
       originalText: "",
       meta: {},
       ...cachedResult
@@ -174,7 +184,7 @@ async function getCachedResult(text, useSummary) {
       ? {
           mode: cachedResult.mode || desiredMode,
           summary: "",
-          fullLink: "",
+          fullLink: sanitizeLink(cachedResult.fullLink, desiredMode === "free"),
           originalText: "",
           originalTextFull: cachedResult.originalTextFull || cachedResult.originalText || "",
           meta: {},
@@ -246,18 +256,7 @@ async function callRemoteAnalyzer(text, useSummary) {
       (data.fullLink ?? data.fullUrl ?? data.url ?? data.link ??
         (data.result ? data.result.fullLink || data.result.url || data.result.link : undefined))) ||
     "";
-  let fullLink = baseLink;
-  if (baseLink) {
-    try {
-      const u = new URL(baseLink);
-      if (originalText) {
-        u.searchParams.set("text", originalText);
-      }
-      fullLink = u.toString();
-    } catch (err) {
-      fullLink = baseLink;
-    }
-  }
+  const fullLink = sanitizeLink(baseLink, summaryMode);
 
   let score = typeof s === "number" ? s : NaN;
   if (Number.isNaN(score) && previewText) {
@@ -298,6 +297,32 @@ function formatError(err) {
   return parts.join(" | ") || "unknown error";
 }
 
+function sanitizeLink(link, summaryMode) {
+  if (!link) return summaryMode ? FRONTEND_FALLBACK : "";
+  let out = link;
+  try {
+    const u = new URL(link);
+    // strip legacy text param
+    u.searchParams.delete("text");
+    if (summaryMode) {
+      u.search = "";
+      if (/\/api\/check/i.test(u.pathname)) {
+        u.pathname = "/analysis-result";
+      }
+    }
+    out = u.toString();
+  } catch (err) {
+    out = link;
+  }
+  if (
+    summaryMode &&
+    (out.includes("swai-backend.onrender.com") || out.includes("/api/check") || out.includes("/api/checkSummary"))
+  ) {
+    out = FRONTEND_FALLBACK;
+  }
+  return out;
+}
+
 async function makeCacheKey(text) {
   const hash = await hashText(text);
   return `analysis:${hash}`;
@@ -313,6 +338,10 @@ async function hashText(text) {
 }
 
 async function showOverlay(tabId, payload, fromCache) {
+  if (payload && !payload.prompt && !payload.error && Number(payload.score) === 0) {
+    await removeOverlay(tabId);
+    return;
+  }
   await chrome.scripting.executeScript({
     target: { tabId },
     func: injectOverlay,
@@ -321,6 +350,11 @@ async function showOverlay(tabId, payload, fromCache) {
 }
 
 function injectOverlay(payload, fromCache) {
+  // Do not show overlay for empty/zero-score results
+  if (payload && !payload.prompt && !payload.error && Number(payload.score) === 0) {
+    return;
+  }
+
   const existing = document.getElementById("privacy-consent-overlay");
   if (existing) existing.remove();
 
@@ -627,7 +661,7 @@ function injectOverlay(payload, fromCache) {
 
     if (modePillEl) {
       const free = result.mode === "free";
-      modePillEl.textContent = free ? "무료" : "전체";
+      modePillEl.textContent = free ? "무료" : "PRO";
       modePillEl.style.background = free ? "rgba(240, 246, 252, 0.12)" : "rgba(88, 166, 255, 0.14)";
       modePillEl.style.color = free ? "#f0f6fc" : "#58a6ff";
     }
@@ -734,7 +768,20 @@ function injectOverlay(payload, fromCache) {
       ul.appendChild(li);
     });
   }
+}
 
+async function removeOverlay(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const el = document.getElementById("privacy-consent-overlay");
+        if (el) el.remove();
+      }
+    });
+  } catch (e) {
+    // ignore
+  }
 }
 
 function openResultTab(url, payload) {

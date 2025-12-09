@@ -24,6 +24,8 @@ const cacheStatus = document.getElementById("cacheStatus");
 const inlineResultEl = document.getElementById("inlineResult");
 const PREF_KEY = "preAnalysisPromptEnabled";
 const FREE_MODE_KEY = "freeVersionEnabled";
+const NEWS_HOME_LINK = "https://gaeinjjeongbo.netlify.app/index.html#news";
+const FRONTEND_FALLBACK = "https://gaeinjjeongbo.netlify.app/analysis-result";
 const NEWS_READ_FREE = "newsReadFree";
 const NEWS_READ_FULL = "newsReadFull";
 const settingsButton = document.getElementById("settingsButton");
@@ -166,8 +168,12 @@ if (clearCacheButton && cacheStatus) {
     const cached = cacheRes?.result;
       if (!lastErr && cached) {
         statusEl.textContent = "Cached result shown!";
-        renderInlineResult(cached, true);
-        hideScanButton();
+        const displayed = renderInlineResult(cached, true);
+        if (displayed) {
+          hideScanButton();
+        } else if (scanButton) {
+          scanButton.style.display = "block";
+        }
         scanButton.disabled = false;
       return;
     }
@@ -186,8 +192,12 @@ if (clearCacheButton && cacheStatus) {
         const result = analysisRes?.result;
         if (result) {
           statusEl.textContent = "Result ready!";
-          renderInlineResult(result, analysisRes.source === "cache");
-          hideScanButton();
+          const displayed = renderInlineResult(result, analysisRes.source === "cache");
+          if (displayed) {
+            hideScanButton();
+          } else if (scanButton) {
+            scanButton.style.display = "block";
+          }
         } else {
           statusEl.textContent = "No result returned.";
           renderPlaceholderResult();
@@ -216,8 +226,12 @@ async function showCachedIfAvailable() {
     const cached = cacheRes?.result;
     if (!lastErr && cached) {
       statusEl.textContent = "Cached result shown!";
-      renderInlineResult(cached, true);
-      hideScanButton();
+      const displayed = renderInlineResult(cached, true);
+      if (displayed) {
+        hideScanButton();
+      } else if (scanButton) {
+        scanButton.style.display = "block";
+      }
     }
   });
 }
@@ -282,8 +296,18 @@ async function renderNewsList() {
   const readIds = await loadReadSet();
   const unreadCount = items.filter((it) => it?.id && !readIds.has(it.id)).length;
   if (newsSubtitle) {
-    newsSubtitle.textContent =
+    const subtitleText =
       unreadCount > 0 ? `${items.length}개의 기사 · ${unreadCount}개 새 글` : `${items.length}개의 기사`;
+    newsSubtitle.textContent = subtitleText;
+    const link = document.createElement("a");
+    link.href = NEWS_HOME_LINK;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = "전체 보기";
+    link.style.marginLeft = "8px";
+    link.style.fontWeight = "700";
+    link.style.textDecoration = "underline";
+    newsSubtitle.appendChild(link);
   }
   if (newsModePill) {
     newsModePill.textContent = freeModeEnabled ? "FREE" : "PRO";
@@ -378,12 +402,12 @@ async function renderNewsList() {
       cat.textContent = item.category;
       tags.appendChild(cat);
     }
-    if (isPremiumFlag) {
-      const p = document.createElement("span");
-      p.className = "news-tag news-tag--premium";
-      p.textContent = "PRO";
-      tags.appendChild(p);
-    }
+    // if (isPremiumFlag) {
+    //   const p = document.createElement("span");
+    //   p.className = "news-tag news-tag--premium";
+    //   p.textContent = "PRO";
+    //   tags.appendChild(p);
+    // }
     if (item.featured || (feed.featuredId && feed.featuredId === item.id)) {
       const feat = document.createElement("span");
       feat.className = "news-tag news-tag--featured";
@@ -704,16 +728,28 @@ function ensureContentScript(tabId, url) {
 }
 
 function renderInlineResult(result, fromCache) {
-  if (!inlineResultEl) return;
+  if (!inlineResultEl) return false;
   inlineResultEl.innerHTML = "";
 
   const safeResult = result || {};
   let summaryText = typeof safeResult.summary === "string" ? safeResult.summary : "";
-  const fullLink = typeof safeResult.fullLink === "string" ? safeResult.fullLink : "";
+  let fullLink = typeof safeResult.fullLink === "string" ? safeResult.fullLink : "";
   const isFreeMode = safeResult.mode === "free";
   const bulletList = Array.isArray(safeResult.bullets) ? safeResult.bullets : [];
   if (!safeResult.meta || typeof safeResult.meta !== "object") {
     safeResult.meta = {};
+  }
+
+  // Ensure free-mode link never points to API nor carries query params
+  if (isFreeMode) {
+    fullLink = sanitizeFullLink(fullLink, true);
+  }
+
+  if (Number(safeResult.score) === 0) {
+    renderPlaceholderResult("분석할 내용이 없습니다.");
+    if (statusEl) statusEl.textContent = "분석할 내용이 없습니다.";
+    if (scanButton) scanButton.style.display = "block";
+    return false;
   }
 
   const card = document.createElement("div");
@@ -728,7 +764,7 @@ function renderInlineResult(result, fromCache) {
 
   const modePill = document.createElement("span");
   modePill.className = "inline-pill inline-pill-mode";
-  modePill.textContent = isFreeMode ? "무료" : "전체";
+  modePill.textContent = isFreeMode ? "무료" : "PRO";
   if (isFreeMode) {
     modePill.style.background = "rgba(15, 23, 42, 0.08)";
     modePill.style.color = "#111827";
@@ -866,10 +902,37 @@ function renderInlineResult(result, fromCache) {
   } else {
     fill.style.height = `${target}%`;
   }
+  return true;
 }
 
 function hideScanButton() {
   if (scanButton) {
     scanButton.style.display = "none";
   }
+}
+
+function sanitizeFullLink(link, summaryMode) {
+  if (!link) return summaryMode ? FRONTEND_FALLBACK : "";
+  let out = link;
+  try {
+    const u = new URL(link);
+    // strip legacy text param
+    u.searchParams.delete("text");
+    if (summaryMode) {
+      u.search = "";
+      if (/\/api\/check/i.test(u.pathname)) {
+        u.pathname = "/analysis-result";
+      }
+    }
+    out = u.toString();
+  } catch (err) {
+    out = link;
+  }
+  if (
+    summaryMode &&
+    (out.includes("swai-backend.onrender.com") || out.includes("/api/check") || out.includes("/api/checkSummary"))
+  ) {
+    out = FRONTEND_FALLBACK;
+  }
+  return out;
 }
