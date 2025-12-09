@@ -10,10 +10,13 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header>
-      <h1 class="text-white mt-5 mb-lg-4">
+    <header class="header-bar">
+      <h1 class="text-white mt-5 mb-lg-4 header-title">
         <span class="brand-em">개</span><span class="brand">인</span><span class="brand-em">정</span><span class="brand">보</span><span class="brand-em">와</span><span class="brand">드</span>
       </h1>
+      <button id="settingsButton" class="icon-button" aria-label="설정 열기" aria-expanded="false">
+        ⚙
+      </button>
     </header>
 
     <div class="tablist" role="tablist" aria-label="Popup views">
@@ -36,73 +39,12 @@
         data-target="panel-news"
       >
         뉴스
-      </button>
-      <button
-        class="tab"
-        id="tab-settings"
-        role="tab"
-        aria-selected="false"
-        aria-controls="panel-settings"
-        data-target="panel-settings"
-      >
-        설정
+        <span class="tab-badge" id="newsBadge" hidden>0</span>
       </button>
     </div>
+    <div class="tab-separator" aria-hidden="true"></div>
 
-    <section
-      id="panel-score"
-      class="tab-panel active"
-      role="tabpanel"
-      aria-labelledby="tab-score"
-    >
-      <button id="scan" type="button">분석하기</button>
-      <div id="status" aria-live="polite"></div>
-      <div id="inlineResult" class="inline-overlay" aria-live="polite"></div>
-    </section>
-
-    <section
-      id="panel-news"
-      class="tab-panel"
-      role="tabpanel"
-      aria-labelledby="tab-news"
-      hidden
-    >
-      <div class="frame-wrap">
-        <iframe
-          id="newsFrame"
-          title="News reel"
-          src="about:blank"
-          loading="lazy"
-          allow="fullscreen"
-        ></iframe>
-        <p class="hint" id="newsHintFull">
-          This view wraps your site&apos;s news reel directly in the popup.
-        </p>
-        <div id="newsLinks" class="news-links" hidden>
-          <p class="hint" id="newsHintFree">무료 버전에서는 알림 대신 링크를 제공합니다.</p>
-          <a
-            id="newsLinkPrimary"
-            class="news-link"
-            href="https://gaeinjjeongbo.netlify.app/news-only"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            개인정보와드 뉴스 피드 열기
-          </a>
-          <a class="news-link" href="https://gaeinjjeongbo.netlify.app/" target="_blank" rel="noopener noreferrer">
-            개인정보와드 사이트 방문
-          </a>
-        </div>
-      </div>
-    </section>
-
-    <section
-      id="panel-settings"
-      class="tab-panel"
-      role="tabpanel"
-      aria-labelledby="tab-settings"
-      hidden
-    >
+    <div id="settingsPanel" class="settings-flyout" hidden>
       <div class="setting-card">
         <div class="setting-head">
           <div>
@@ -143,6 +85,33 @@
         </div>
         <div id="cacheStatus" class="setting-note" aria-live="polite"></div>
       </div>
+    </div>
+
+    <section
+      id="panel-score"
+      class="tab-panel active"
+      role="tabpanel"
+      aria-labelledby="tab-score"
+    >
+      <div id="status" aria-live="polite" class="status-inline"></div>
+      <div id="inlineResult" class="inline-overlay" aria-live="polite"></div>
+      <button id="scan" type="button" class="primary-button">분석 시작</button>
+    </section>
+
+    <section
+      id="panel-news"
+      class="tab-panel"
+      role="tabpanel"
+      aria-labelledby="tab-news"
+      hidden
+    >
+      <div class="news-head">
+          <div>
+            <div class="news-subtitle" id="newsSubtitle">최신 소식을 불러오는 중입니다…</div>
+          </div>
+          <span class="news-mode-pill" id="newsModePill">FREE</span>
+        </div>
+        <div id="newsList" class="news-list" aria-live="polite"></div>
     </section>
 
     <script src="popup.js"></script>

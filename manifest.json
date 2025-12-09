@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Privacy Agreement Checker",
-  "version": "1.0.0",
-  "description": "Detects 개인정보 동의서 text on pages and sends it to a backend for analysis.",
+  "name": "개인정보와드 플러그인",
+  "version": "1.3.0",
+  "description": "개인정보 동의서 분석 툴 및 뉴스 확인",
   "icons": {
     "16": "assets/icon16.png",
     "48": "assets/icon48.png",
