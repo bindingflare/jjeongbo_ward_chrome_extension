@@ -397,7 +397,57 @@ function injectOverlay(payload, fromCache) {
   title.appendChild(pill);
   title.appendChild(closeBtn);
 
+  // Scoped styles for water meter (matches site)
+  const meterStyle = document.createElement("style");
+  meterStyle.textContent = `
+    #privacy-consent-overlay .water-meter {
+      --fill: 0%;
+      --water: hsl(240 85% 52%);
+      --waterLight: hsl(240 90% 70%);
+      width: 84px;
+      height: 84px;
+      border-radius: 50%;
+      position: relative;
+      overflow: hidden;
+      background: #f5f5f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #privacy-consent-overlay .water-meter > #riskScore {
+      position: relative;
+      z-index: 2;
+      font-size: 1.25rem;
+      font-weight: 700;
+    }
+    #privacy-consent-overlay .water-meter .water {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 100%;
+      height: var(--fill);
+      background: linear-gradient(to top, var(--water) 0%, var(--waterLight) 100%);
+      transition: height 600ms ease, background-color 300ms ease;
+    }
+    #privacy-consent-overlay .water-meter .water::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -8px;
+      height: 16px;
+      background: radial-gradient(circle at 10% 50%, rgba(255,255,255,.35) 20%, transparent 22%) 0 0/18px 16px repeat-x,
+                  radial-gradient(circle at 50% 40%, rgba(255,255,255,.2) 20%, transparent 22%) 0 0/22px 16px repeat-x;
+      animation: waveSlide 3.5s linear infinite;
+    }
+    @keyframes waveSlide {
+      from { background-position: 0 0, 0 0; }
+      to { background-position: 100% 0, -100% 0; }
+    }
+  `;
+
   if (payload && payload.prompt) {
+    container.appendChild(meterStyle);
     const body = document.createElement("div");
     body.style.marginTop = "8px";
     body.style.lineHeight = "1.5";
@@ -498,29 +548,13 @@ function injectOverlay(payload, fromCache) {
 
   const meterEl = document.createElement("div");
   meterEl.id = "riskMeter";
+  meterEl.className = "water-meter";
   meterEl.dataset.prev = "0";
-  meterEl.style.cssText = `
-    position: relative;
-    width: 46px;
-    height: 82px;
-    border-radius: 12px;
-    background: #0b1623;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    overflow: hidden;
-    --fill: 0%;
-    --water: hsl(200 85% 52%);
-    --waterLight: hsl(200 90% 70%);
-  `;
+  meterEl.style.setProperty("--fill", "0%");
+  meterEl.style.setProperty("--water", "hsl(200 85% 52%)");
+  meterEl.style.setProperty("--waterLight", "hsl(200 90% 70%)");
   const meterWater = document.createElement("div");
-  meterWater.style.cssText = `
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    width: 100%;
-    height: var(--fill);
-    background: linear-gradient(180deg, var(--waterLight) 0%, var(--water) 60%, var(--water) 100%);
-    transition: height 0.2s ease-out;
-  `;
+  meterWater.className = "water";
   meterEl.appendChild(meterWater);
 
   const scoreWrap = document.createElement("div");
@@ -561,7 +595,7 @@ function injectOverlay(payload, fromCache) {
   linkWrap.appendChild(linkEl);
 
   resultCard.append(row, list, summaryBox, linkWrap);
-  container.append(title, resultCard);
+  container.append(title, meterStyle, resultCard);
   document.body.appendChild(container);
 
   const normalized =
@@ -587,9 +621,9 @@ function injectOverlay(payload, fromCache) {
     const modePillEl = document.getElementById("resultModePill");
     if (!resultCardEl || !scoreElInner || !labelElInner || !ul || !meter) return;
 
-    resultCardEl.classList.remove("d-none");
-    scoreElInner.textContent = `${result.score}`;
-    labelElInner.textContent = `위험도: ${result.label}`;
+  resultCardEl.classList.remove("d-none");
+  scoreElInner.textContent = `${result.score}`;
+  labelElInner.textContent = `위험도: ${result.label}`;
 
     if (modePillEl) {
       const free = result.mode === "free";
@@ -598,14 +632,31 @@ function injectOverlay(payload, fromCache) {
       modePillEl.style.color = free ? "#f0f6fc" : "#58a6ff";
     }
 
-    if (summaryBoxEl) {
-      if (result.summary) {
-        summaryBoxEl.textContent = result.summary;
-        summaryBoxEl.style.display = "block";
-      } else {
-        summaryBoxEl.style.display = "none";
-      }
+  if (summaryBoxEl) {
+    let summaryText = "";
+    if (typeof result.summary === "string" && result.summary) {
+      summaryText = result.summary;
+    } else if (result.meta && typeof result.meta.preview === "string") {
+      summaryText = result.meta.preview;
     }
+
+    if (summaryText) {
+      summaryText = summaryText
+        .split("\n")
+        .filter((line) => {
+          const lower = line.trim().toLowerCase();
+          return !(lower.startsWith("score:") || lower.startsWith("label:"));
+        })
+        .join("\n")
+        .trim();
+    }
+    if (summaryText) {
+      summaryBoxEl.textContent = summaryText;
+      summaryBoxEl.style.display = "block";
+    } else {
+      summaryBoxEl.style.display = "none";
+    }
+  }
 
     if (linkWrapEl && linkEl) {
       if (result.mode === "free" && result.fullLink) {

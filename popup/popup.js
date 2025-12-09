@@ -142,7 +142,7 @@ if (clearCacheButton && cacheStatus) {
       return;
     }
 
-  const { text, error } = await fetchConsentText(active.id, active.url);
+  const { text, error, fromFallback } = await fetchConsentText(active.id, active.url);
     if (error === "no_content") {
       statusEl.textContent = "Content script unavailable on this page.";
       renderPlaceholderResult();
@@ -156,6 +156,10 @@ if (clearCacheButton && cacheStatus) {
       scanButton.disabled = false;
       return;
     }
+
+  if (fromFallback) {
+    statusEl.textContent = "Detector failed — analyzing full page text.";
+  }
 
   chrome.runtime.sendMessage({ type: "GET_CACHED_RESULT", text, useSummary: summaryMode }, (cacheRes) => {
     const lastErr = chrome.runtime.lastError;
@@ -595,6 +599,16 @@ function isBlockedScheme(url) {
 
 function fetchConsentText(tabId, url) {
   return new Promise((resolve) => {
+    const tryFallback = () => {
+      fallbackGetPageText(tabId).then((fallbackText) => {
+        if (fallbackText) {
+          resolve({ text: fallbackText, fromFallback: true });
+        } else {
+          resolve({ error: "no_content" });
+        }
+      });
+    };
+
     chrome.tabs.sendMessage(tabId, { type: "GET_CONSENT_TEXT" }, (res) => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
@@ -607,17 +621,52 @@ function fetchConsentText(tabId, url) {
             chrome.tabs.sendMessage(tabId, { type: "GET_CONSENT_TEXT" }, (res2) => {
               const err2 = chrome.runtime.lastError;
               if (err2) {
-                resolve({ error: "no_content" });
+                tryFallback();
                 return;
               }
-              resolve({ text: res2?.text });
+              if (res2?.text) {
+                resolve({ text: res2.text });
+              } else {
+                tryFallback();
+              }
             });
           })
-          .catch(() => resolve({ error: "no_content" }));
+          .catch(() => tryFallback());
       } else {
-        resolve({ text: res?.text });
+        if (res?.text) {
+          resolve({ text: res.text });
+        } else {
+          tryFallback();
+        }
       }
     });
+  });
+}
+
+function fallbackGetPageText(tabId) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        func: () => {
+          try {
+            const raw = document.body ? document.body.innerText || document.body.textContent || "" : "";
+            // Limit size to avoid oversized payloads
+            return raw.slice(0, 15000);
+          } catch (e) {
+            return "";
+          }
+        }
+      },
+      (results) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError || !Array.isArray(results) || !results[0]) {
+          resolve("");
+          return;
+        }
+        resolve(typeof results[0].result === "string" ? results[0].result.trim() : "");
+      }
+    );
   });
 }
 
@@ -659,7 +708,7 @@ function renderInlineResult(result, fromCache) {
   inlineResultEl.innerHTML = "";
 
   const safeResult = result || {};
-  const summaryText = typeof safeResult.summary === "string" ? safeResult.summary : "";
+  let summaryText = typeof safeResult.summary === "string" ? safeResult.summary : "";
   const fullLink = typeof safeResult.fullLink === "string" ? safeResult.fullLink : "";
   const isFreeMode = safeResult.mode === "free";
   const bulletList = Array.isArray(safeResult.bullets) ? safeResult.bullets : [];
@@ -730,6 +779,17 @@ function renderInlineResult(result, fromCache) {
   card.append(header, row, list);
 
   if (summaryText) {
+    summaryText = summaryText
+      .split("\n")
+      .filter((line) => {
+        const lower = line.trim().toLowerCase();
+        return !(lower.startsWith("score:") || lower.startsWith("label:"));
+      })
+      .join("\n")
+      .trim();
+  }
+
+  if (summaryText) {
     const summaryEl = document.createElement("div");
     summaryEl.className = "inline-summary";
     summaryEl.textContent = summaryText;
@@ -747,13 +807,65 @@ function renderInlineResult(result, fromCache) {
       e.preventDefault();
       chrome.runtime.sendMessage({ type: "OPEN_FULL_RESULT", url: fullLink, payload: safeResult });
     });
-    card.appendChild(link);
+  card.appendChild(link);
   }
 
   inlineResultEl.appendChild(card);
 
   const target = Math.max(0, Math.min(100, Number(safeResult.score) || 0));
-  fill.style.height = `${target}%`;
+
+  function scoreToHue(s) {
+    let hue;
+    if (s <= 30) {
+      hue = 200; // ocean blue
+    } else if (s <= 50) {
+      const t1 = (s - 30) / 20; // 0..1
+      hue = 200 - t1 * (200 - 120); // 200→120
+    } else if (s <= 80) {
+      const t2 = (s - 50) / 30; // 0..1
+      hue = 120 - t2 * (120 - 50); // 120→50
+    } else {
+      const t3 = (s - 80) / 20; // 0..1
+      hue = 30 - t3 * (30 - 0); // 30→0
+    }
+    return Math.max(0, Math.min(360, Math.round(hue)));
+  }
+
+  if (meter) {
+    if (meter.__rafId) cancelAnimationFrame(meter.__rafId);
+    let from = parseFloat(meter.dataset.prev);
+    if (Number.isNaN(from)) from = target;
+
+    let start;
+    const duration = 1000;
+    const ease = (t) => 1 - Math.pow(1 - t, 3); // easeOutCubic
+
+    function step(ts) {
+      if (start == null) start = ts;
+      const p = Math.min(1, (ts - start) / duration);
+      const e = ease(p);
+      const cur = from + (target - from) * e;
+      const hue = scoreToHue(cur);
+      const water = `hsl(${hue} 85% 52%)`;
+      const waterLight = `hsl(${hue} 90% 70%)`;
+      fill.style.background = `linear-gradient(to top, ${water} 0%, ${waterLight} 100%)`;
+      fill.style.height = `${cur}%`;
+      scoreEl.textContent = String(Math.round(cur));
+      if (p < 1) {
+        meter.__rafId = requestAnimationFrame(step);
+      } else {
+        delete meter.__rafId;
+        meter.dataset.prev = String(target);
+      }
+    }
+
+    meter.setAttribute("aria-valuemin", "0");
+    meter.setAttribute("aria-valuemax", "100");
+    meter.setAttribute("role", "meter");
+    meter.__rafId = requestAnimationFrame(step);
+  } else {
+    fill.style.height = `${target}%`;
+  }
 }
 
 function hideScanButton() {
