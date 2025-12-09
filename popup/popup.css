@@ -225,6 +225,33 @@ button:not(:disabled):hover {
   line-height: 1.4;
 }
 
+.inline-summary {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--grey-color);
+  border: 1px solid #e7e7e7;
+  border-radius: 10px;
+  line-height: 1.5;
+  color: var(--p-color);
+}
+
+.inline-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-weight: 700;
+  color: #0b5cab;
+  text-decoration: none;
+}
+
+.inline-link:hover {
+  text-decoration: underline;
+}
+
+.inline-pill-mode {
+  background: rgba(88, 166, 255, 0.14);
+  color: #0b5cab;
+}
+
 .frame-wrap {
   background: var(--section-bg-color);
   border: none;
@@ -246,6 +273,30 @@ button:not(:disabled):hover {
   opacity: 0.8;
   line-height: 1.5;
   color: var(--p-color);
+}
+
+.news-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 0;
+}
+
+.news-link {
+  display: inline-block;
+  padding: 9px 12px;
+  background: var(--white-color);
+  color: var(--dark-color);
+  border: 1px solid #dcdcdc;
+  border-radius: 10px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.news-link:hover {
+  border-color: var(--primary-color);
+  color: var(--dark-color);
 }
 
 .setting-card {

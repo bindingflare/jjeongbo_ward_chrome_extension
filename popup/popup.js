@@ -5,24 +5,59 @@ const statusEl = document.getElementById("status");
 const tabButtons = Array.from(document.querySelectorAll("[data-target]"));
 const panels = Array.from(document.querySelectorAll(".tab-panel"));
 const newsFrame = document.getElementById("newsFrame");
+const newsLinks = document.getElementById("newsLinks");
+const newsLinkPrimary = document.getElementById("newsLinkPrimary");
+const newsHintFull = document.getElementById("newsHintFull");
+const newsHintFree = document.getElementById("newsHintFree");
 const prePromptToggle = document.getElementById("prePromptToggle");
+const freeModeToggle = document.getElementById("freeModeToggle");
 const clearCacheButton = document.getElementById("clearCache");
 const cacheStatus = document.getElementById("cacheStatus");
 const inlineResultEl = document.getElementById("inlineResult");
 const PREF_KEY = "preAnalysisPromptEnabled";
+const FREE_MODE_KEY = "freeVersionEnabled";
 let triedAutoCache = false;
+let freeModeEnabled = false;
+const prefsReady = new Promise((resolve) => {
+  chrome.storage.local.get({ [PREF_KEY]: false, [FREE_MODE_KEY]: false }, (res) => {
+    if (prePromptToggle) {
+      prePromptToggle.checked = Boolean(res[PREF_KEY]);
+    }
+    freeModeEnabled = Boolean(res[FREE_MODE_KEY]);
+    if (freeModeToggle) {
+      freeModeToggle.checked = freeModeEnabled;
+    }
+    renderNewsView();
+    resolve();
+  });
+});
 
 if (newsFrame) {
   newsFrame.dataset.src = NEWS_REEL_URL;
 }
 
-if (prePromptToggle) {
-  chrome.storage.local.get({ [PREF_KEY]: false }, (res) => {
-    prePromptToggle.checked = Boolean(res[PREF_KEY]);
-  });
+if (newsLinkPrimary) {
+  newsLinkPrimary.href = NEWS_REEL_URL;
+}
 
+if (prePromptToggle) {
   prePromptToggle.addEventListener("change", () => {
     chrome.storage.local.set({ [PREF_KEY]: prePromptToggle.checked });
+  });
+}
+
+if (freeModeToggle) {
+  freeModeToggle.addEventListener("change", () => {
+    freeModeEnabled = freeModeToggle.checked;
+    chrome.storage.local.set({ [FREE_MODE_KEY]: freeModeEnabled }, () => {
+      renderNewsView();
+      if (inlineResultEl) {
+        inlineResultEl.innerHTML = "";
+      }
+      if (statusEl) {
+        statusEl.textContent = freeModeEnabled ? "무료 버전으로 전환했습니다." : "전체 버전으로 전환했습니다.";
+      }
+    });
   });
 }
 
@@ -35,7 +70,9 @@ if (clearCacheButton && cacheStatus) {
         cacheStatus.textContent = "Failed to clear cache.";
         return;
       }
-      prePromptToggle.checked = false;
+      if (prePromptToggle) {
+        prePromptToggle.checked = false;
+      }
       chrome.storage.local.set({ [PREF_KEY]: false }, () => {
         cacheStatus.textContent = "Cache cleared.";
         setTimeout(() => {
@@ -58,9 +95,11 @@ activateTab("panel-score");
 showCachedIfAvailable();
 
 scanButton.addEventListener("click", async () => {
+  await prefsReady;
   if (inlineResultEl) inlineResultEl.innerHTML = "";
   statusEl.textContent = "Scanning...";
   scanButton.disabled = true;
+  const summaryMode = freeModeEnabled;
 
   const active = await getActivePageTab();
 
@@ -89,7 +128,7 @@ scanButton.addEventListener("click", async () => {
     return;
   }
 
-  chrome.runtime.sendMessage({ type: "GET_CACHED_RESULT", text }, (cacheRes) => {
+  chrome.runtime.sendMessage({ type: "GET_CACHED_RESULT", text, useSummary: summaryMode }, (cacheRes) => {
     const lastErr = chrome.runtime.lastError;
     const cached = cacheRes?.result;
     if (!lastErr && cached) {
@@ -101,7 +140,7 @@ scanButton.addEventListener("click", async () => {
     }
 
     chrome.runtime.sendMessage(
-      { type: "ANALYZE_TEXT_DIRECT", text, tabId: active.id },
+      { type: "ANALYZE_TEXT_DIRECT", text, tabId: active.id, useSummary: summaryMode },
       (analysisRes) => {
         const err = chrome.runtime.lastError || analysisRes?.error;
         if (err) {
@@ -128,13 +167,16 @@ async function showCachedIfAvailable() {
   if (triedAutoCache) return;
   triedAutoCache = true;
 
+  await prefsReady;
+  const summaryMode = freeModeEnabled;
+
   const active = await getActivePageTab();
   if (!active?.id || isBlockedScheme(active.url)) return;
 
   const { text } = await fetchConsentText(active.id, active.url);
   if (!text) return;
 
-  chrome.runtime.sendMessage({ type: "GET_CACHED_RESULT", text }, (cacheRes) => {
+  chrome.runtime.sendMessage({ type: "GET_CACHED_RESULT", text, useSummary: summaryMode }, (cacheRes) => {
     const lastErr = chrome.runtime.lastError;
     const cached = cacheRes?.result;
     if (!lastErr && cached) {
@@ -160,17 +202,52 @@ function activateTab(targetId) {
   });
 
   if (targetId === "panel-news") {
-    ensureNewsFrame();
+    prefsReady.then(() => {
+      renderNewsView();
+      if (!freeModeEnabled) {
+        ensureNewsFrame();
+      }
+    });
   }
 }
 
 function ensureNewsFrame() {
-  if (!newsFrame || newsFrame.dataset.loaded === "true") return;
+  if (!newsFrame || freeModeEnabled || newsFrame.dataset.loaded === "true") return;
 
   const src = newsFrame.dataset.src || NEWS_REEL_URL;
   if (src) {
     newsFrame.src = src;
     newsFrame.dataset.loaded = "true";
+  }
+}
+
+function renderNewsView() {
+  const panelNews = document.getElementById("panel-news");
+  const active = panelNews?.classList.contains("active");
+
+  if (newsFrame) {
+    if (freeModeEnabled) {
+      newsFrame.hidden = true;
+      newsFrame.src = "about:blank";
+      newsFrame.dataset.loaded = "false";
+    } else {
+      newsFrame.hidden = false;
+      if (active) {
+        ensureNewsFrame();
+      }
+    }
+  }
+
+  if (newsLinks) {
+    newsLinks.hidden = !freeModeEnabled;
+  }
+
+  if (newsHintFull) {
+    newsHintFull.hidden = freeModeEnabled;
+  }
+
+  if (newsHintFree) {
+    newsHintFree.hidden = !freeModeEnabled;
   }
 }
 
@@ -268,6 +345,15 @@ function renderInlineResult(result, fromCache) {
   if (!inlineResultEl) return;
   inlineResultEl.innerHTML = "";
 
+  const safeResult = result || {};
+  const summaryText = typeof safeResult.summary === "string" ? safeResult.summary : "";
+  const fullLink = typeof safeResult.fullLink === "string" ? safeResult.fullLink : "";
+  const isFreeMode = safeResult.mode === "free";
+  const bulletList = Array.isArray(safeResult.bullets) ? safeResult.bullets : [];
+  if (!safeResult.meta || typeof safeResult.meta !== "object") {
+    safeResult.meta = {};
+  }
+
   const card = document.createElement("div");
   card.className = "inline-card";
 
@@ -278,6 +364,17 @@ function renderInlineResult(result, fromCache) {
   title.className = "inline-title";
   title.textContent = "분석 결과";
 
+  const modePill = document.createElement("span");
+  modePill.className = "inline-pill inline-pill-mode";
+  modePill.textContent = isFreeMode ? "무료" : "전체";
+  if (isFreeMode) {
+    modePill.style.background = "rgba(15, 23, 42, 0.08)";
+    modePill.style.color = "#111827";
+  } else {
+    modePill.style.background = "rgba(88, 166, 255, 0.14)";
+    modePill.style.color = "#0b5cab";
+  }
+
   const pill = document.createElement("span");
   pill.className = "inline-pill";
   pill.textContent = fromCache ? "캐시" : "실시간";
@@ -286,7 +383,7 @@ function renderInlineResult(result, fromCache) {
     pill.style.color = "#34d399";
   }
 
-  header.append(title, pill);
+  header.append(title, modePill, pill);
 
   const row = document.createElement("div");
   row.className = "inline-row";
@@ -300,27 +397,49 @@ function renderInlineResult(result, fromCache) {
   const scoreWrap = document.createElement("div");
   const scoreEl = document.createElement("div");
   scoreEl.className = "inline-score";
-  scoreEl.textContent = Math.round(result.score ?? 0);
+  scoreEl.textContent = Math.round(safeResult.score ?? 0);
 
   const labelEl = document.createElement("div");
   labelEl.className = "inline-label";
-  labelEl.textContent = `위험도: ${result.label || "-"}`;
+  labelEl.textContent = `위험도: ${safeResult.label || "-"}`;
 
   scoreWrap.append(scoreEl, labelEl);
   row.append(meter, scoreWrap);
 
   const list = document.createElement("ul");
   list.className = "inline-list";
-  (result.bullets || []).forEach((b) => {
+  bulletList.forEach((b) => {
     const li = document.createElement("li");
     li.textContent = b;
     list.appendChild(li);
   });
 
   card.append(header, row, list);
+
+  if (summaryText) {
+    const summaryEl = document.createElement("div");
+    summaryEl.className = "inline-summary";
+    summaryEl.textContent = summaryText;
+    card.appendChild(summaryEl);
+  }
+
+  if (isFreeMode && fullLink) {
+    const link = document.createElement("a");
+    link.className = "inline-link";
+    link.href = fullLink;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = "전체 결과 보기";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.sendMessage({ type: "OPEN_FULL_RESULT", url: fullLink, payload: safeResult });
+    });
+    card.appendChild(link);
+  }
+
   inlineResultEl.appendChild(card);
 
-  const target = Math.max(0, Math.min(100, Number(result.score) || 0));
+  const target = Math.max(0, Math.min(100, Number(safeResult.score) || 0));
   fill.style.height = `${target}%`;
 }
 

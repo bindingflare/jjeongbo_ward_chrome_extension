@@ -1,10 +1,13 @@
 const ANALYZE_ENDPOINT = "https://swai-backend.onrender.com/api/check";
+const ANALYZE_SUMMARY_ENDPOINT = "https://swai-backend.onrender.com/api/checkSummary";
+const SUMMARY_TEXT_LIMIT = 200;
 const PREF_KEY = "preAnalysisPromptEnabled";
+const FREE_MODE_KEY = "freeVersionEnabled";
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "FOUND_CONSENT" && typeof msg.text === "string") {
     // Auto/content-script path → page overlay
-    handleConsent(msg.text, sender.tab?.id)
+    handleConsent(msg.text, sender.tab?.id, { useSummary: msg.useSummary })
       .then(sendResponse)
       .catch((error) => {
         console.error("Consent handling failed", error);
@@ -15,7 +18,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "PROMPT_ANALYZE" && typeof msg.text === "string") {
     // Overlay prompt “Send analysis” action
-    handleConsent(msg.text, sender.tab?.id, { skipPrompt: true })
+    handleConsent(msg.text, sender.tab?.id, { skipPrompt: true, useSummary: msg.useSummary })
       .then(sendResponse)
       .catch((error) => {
         console.error("Prompt analysis failed", error);
@@ -26,7 +29,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "ANALYZE_TEXT_DIRECT" && typeof msg.text === "string") {
     // Extension popup (inline result) path: no overlay, no prompt
-    directAnalyzeFromPopup(msg.text, msg.tabId)
+    directAnalyzeFromPopup(msg.text, msg.tabId, msg.useSummary)
       .then(sendResponse)
       .catch((error) => {
         console.error("Direct analysis failed", error);
@@ -36,11 +39,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === "GET_CACHED_RESULT" && typeof msg.text === "string") {
-    getCachedResult(msg.text)
+    getCachedResult(msg.text, msg.useSummary)
       .then((cachedResult) => sendResponse({ result: cachedResult }))
       .catch((error) => {
         console.error("Cache lookup failed", error);
         sendResponse({ result: null });
+      });
+    return true;
+  }
+
+  if (msg?.type === "OPEN_FULL_RESULT" && typeof msg.url === "string") {
+    openResultTab(msg.url, msg.payload)
+      .then((ok) => sendResponse({ ok }))
+      .catch((error) => {
+        console.error("Full result open failed", error);
+        sendResponse({ ok: false });
       });
     return true;
   }
@@ -51,16 +64,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function handleConsent(text, tabId, options = {}) {
   const skipPrompt = Boolean(options.skipPrompt);
   const suppressOverlay = Boolean(options.suppressOverlay);
+  const explicitUseSummary = options.useSummary;
 
   if (!tabId) {
     console.warn("No tabId provided for consent result");
     return { error: "no_tab" };
   }
 
-  const cacheKey = await hashText(text);
+  const prefs = await chrome.storage.local.get({
+    [PREF_KEY]: false,
+    [FREE_MODE_KEY]: false
+  });
+  const useSummary = typeof explicitUseSummary === "boolean" ? explicitUseSummary : Boolean(prefs[FREE_MODE_KEY]);
+  const desiredMode = useSummary ? "free" : "full";
+
+  const cacheKey = await makeCacheKey(text);
   const cache = await chrome.storage.local.get(cacheKey);
-  const cachedResult = cache[cacheKey];
-  const prefs = await chrome.storage.local.get({ [PREF_KEY]: false });
+  const cachedResultRaw = cache[cacheKey];
+  const cachedResult =
+    cachedResultRaw && (cachedResultRaw.mode || desiredMode) === desiredMode
+      ? {
+          mode: cachedResultRaw.mode || desiredMode,
+          summary: "",
+          fullLink: "",
+          ...cachedResultRaw
+        }
+      : null;
 
   // Inline/popup-direct path: return cached immediately, bypass prompt/overlay
   if (suppressOverlay) {
@@ -70,7 +99,11 @@ async function handleConsent(text, tabId, options = {}) {
   } else {
     // Overlay path: honor prompt setting
     if (prefs[PREF_KEY] && !skipPrompt) {
-      await showOverlay(tabId, { prompt: true, text, cacheAvailable: Boolean(cachedResult) }, false);
+      await showOverlay(
+        tabId,
+        { prompt: true, text, cacheAvailable: Boolean(cachedResult), mode: useSummary ? "free" : "full" },
+        false
+      );
       return { source: "prompt" };
     }
 
@@ -89,7 +122,7 @@ async function handleConsent(text, tabId, options = {}) {
 
   let result;
   try {
-    result = await callRemoteAnalyzer(text);
+    result = await callRemoteAnalyzer(text, useSummary);
   } catch (error) {
     console.error("API call failed", error);
     const detail = formatError(error);
@@ -106,45 +139,76 @@ async function handleConsent(text, tabId, options = {}) {
   return { source: "api", result };
 }
 
-async function directAnalyzeFromPopup(text, tabId) {
+async function directAnalyzeFromPopup(text, tabId, useSummary) {
   if (!tabId) {
     return { error: "no_tab" };
   }
 
-  const cacheKey = await hashText(text);
+  const cacheKey = await makeCacheKey(text);
   const cache = await chrome.storage.local.get(cacheKey);
   const cachedResult = cache[cacheKey];
+  const desiredMode = useSummary ? "free" : "full";
 
-  if (cachedResult) {
-    return { source: "cache", result: cachedResult };
+  if (cachedResult && (cachedResult.mode || desiredMode) === desiredMode) {
+    const normalized = {
+      mode: cachedResult.mode || desiredMode,
+      summary: "",
+      fullLink: "",
+      originalText: "",
+      meta: {},
+      ...cachedResult
+    };
+    return { source: "cache", result: normalized };
   }
 
-  return handleConsent(text, tabId, { skipPrompt: true, suppressOverlay: true });
+  return handleConsent(text, tabId, { skipPrompt: true, suppressOverlay: true, useSummary });
 }
 
-async function getCachedResult(text) {
-  const cacheKey = await hashText(text);
+async function getCachedResult(text, useSummary) {
+  const cacheKey = await makeCacheKey(text);
   const cache = await chrome.storage.local.get(cacheKey);
-  return cache[cacheKey] || null;
+  const cachedResult = cache[cacheKey];
+  const desiredMode = useSummary ? "free" : "full";
+  return cachedResult
+    ? (cachedResult.mode || desiredMode) === desiredMode
+      ? {
+          mode: cachedResult.mode || desiredMode,
+          summary: "",
+          fullLink: "",
+          originalText: "",
+          originalTextFull: cachedResult.originalTextFull || cachedResult.originalText || "",
+          meta: {},
+          ...cachedResult
+        }
+      : null
+    : null;
 }
 
-async function callRemoteAnalyzer(text) {
-  if (!ANALYZE_ENDPOINT) throw new Error("Analyzer endpoint missing");
+async function callRemoteAnalyzer(text, useSummary) {
+  const summaryMode = Boolean(useSummary);
+  const endpoint = summaryMode ? ANALYZE_SUMMARY_ENDPOINT : ANALYZE_ENDPOINT;
+  if (!endpoint) throw new Error("Analyzer endpoint missing");
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
 
+  let url = endpoint;
+  const headers = {
+    Accept: "application/json"
+  };
+  const fetchOptions = {
+    method: "POST",
+    headers,
+    signal: controller.signal
+  };
+
+  const originalProvidedText = text || "";
+  headers["Content-Type"] = "application/json";
+  fetchOptions.body = JSON.stringify({ text: originalProvidedText });
+
   let res;
   try {
-    res = await fetch(ANALYZE_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      body: JSON.stringify({ text }),
-      signal: controller.signal
-    });
+    res = await fetch(url, fetchOptions);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -159,16 +223,69 @@ async function callRemoteAnalyzer(text) {
   }
 
   const data = await res.json().catch(() => ({}));
+  const meta = data && typeof data === "object" ? data.meta || {} : {};
   const s = data && (data.score ?? data.riskScore ?? (data.result ? data.result.score : undefined));
   const l = data && (data.label ?? (data.result ? data.result.label : undefined));
   const b = (data && (data.bullets ?? data.issues ?? (data.result ? data.result.bullets : undefined))) || [];
+  const previewText = typeof meta.preview === "string" ? meta.preview : "";
+  const summaryText =
+    (data &&
+      (data.summary ??
+        data.shortSummary ??
+        data.short ??
+        (meta ? meta.summary || meta.shortSummary : undefined) ??
+        (data.result ? data.result.summary : undefined))) ||
+    previewText ||
+    "";
+  const originalText =
+    (meta && typeof meta.originalText === "string" && meta.originalText) || originalProvidedText;
+  const baseLink =
+    (meta &&
+      (meta.fullLink || meta.fullUrl || meta.url || meta.link)) ||
+    (data &&
+      (data.fullLink ?? data.fullUrl ?? data.url ?? data.link ??
+        (data.result ? data.result.fullLink || data.result.url || data.result.link : undefined))) ||
+    "";
+  let fullLink = baseLink;
+  if (baseLink) {
+    try {
+      const u = new URL(baseLink);
+      if (originalText) {
+        u.searchParams.set("text", originalText);
+      }
+      fullLink = u.toString();
+    } catch (err) {
+      fullLink = baseLink;
+    }
+  }
 
-  let score = typeof s === "number" ? s : 0;
-  score = Math.max(0, Math.min(100, score));
-  const label = l || "(레이블 정보 없음)";
+  let score = typeof s === "number" ? s : NaN;
+  if (Number.isNaN(score) && previewText) {
+    const m = previewText.match(/score:\s*([0-9]+)/i);
+    if (m) score = Number(m[1]);
+  }
+  score = Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0;
+
+  let label = l;
+  if (!label && previewText) {
+    const lm = previewText.match(/label:\s*([^\n]+)/i);
+    if (lm) label = lm[1].trim();
+  }
+  label = label || "(레이블 정보 없음)";
   const bullets = Array.isArray(b) ? b : [];
 
-  return { score, label, bullets };
+  return {
+    ...data,
+    score,
+    label,
+    bullets,
+    summary: summaryText,
+    fullLink: summaryMode ? fullLink : "",
+    originalText,
+    originalTextFull: originalProvidedText,
+    meta,
+    mode: summaryMode ? "free" : "full"
+  };
 }
 
 function formatError(err) {
@@ -179,6 +296,11 @@ function formatError(err) {
   if (err.status) parts.push(`status ${err.status}`);
   if (err.body) parts.push(`body: ${String(err.body).slice(0, 200)}`);
   return parts.join(" | ") || "unknown error";
+}
+
+async function makeCacheKey(text) {
+  const hash = await hashText(text);
+  return `analysis:${hash}`;
 }
 
 async function hashText(text) {
@@ -226,6 +348,22 @@ function injectOverlay(payload, fromCache) {
   title.style.gap = "8px";
   title.textContent = "분석 결과";
 
+  const modePill = document.createElement("span");
+  modePill.id = "resultModePill";
+  const isFreeMode = payload && payload.mode === "free";
+  modePill.textContent = isFreeMode ? "무료" : "전체";
+  modePill.style.cssText = `
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: ${isFreeMode ? "rgba(240, 246, 252, 0.12)" : "rgba(88, 166, 255, 0.14)"};
+    color: ${isFreeMode ? "#f0f6fc" : "#58a6ff"};
+    font-size: 11px;
+    font-weight: 600;
+  `;
+
   const closeBtn = document.createElement("button");
   closeBtn.type = "button";
   closeBtn.textContent = "×";
@@ -255,6 +393,7 @@ function injectOverlay(payload, fromCache) {
     font-size: 11px;
     font-weight: 600;
   `;
+  title.appendChild(modePill);
   title.appendChild(pill);
   title.appendChild(closeBtn);
 
@@ -306,14 +445,17 @@ function injectOverlay(payload, fromCache) {
     sendBtn.addEventListener("click", () => {
       sendBtn.disabled = true;
       sendBtn.textContent = payload.cacheAvailable ? "Loading..." : "Sending...";
-      chrome.runtime.sendMessage({ type: "PROMPT_ANALYZE", text: payload.text || "" }, (res) => {
-        const lastError = chrome.runtime.lastError;
-        if (lastError || res?.error) {
-          sendBtn.disabled = false;
-          sendBtn.textContent = payload.cacheAvailable ? "Retry" : "Retry send";
-          body.appendChild(document.createTextNode(" 전송에 실패했습니다. 다시 시도해주세요."));
+      chrome.runtime.sendMessage(
+        { type: "PROMPT_ANALYZE", text: payload.text || "", useSummary: payload.mode === "free" },
+        (res) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError || res?.error) {
+            sendBtn.disabled = false;
+            sendBtn.textContent = payload.cacheAvailable ? "Retry" : "Retry send";
+            body.appendChild(document.createTextNode(" 전송에 실패했습니다. 다시 시도해주세요."));
+          }
         }
-      });
+      );
     });
 
     actions.append(sendBtn);//, cancelBtn);
@@ -401,12 +543,36 @@ function injectOverlay(payload, fromCache) {
   list.id = "riskBullets";
   list.style.cssText = "margin: 10px 0 0 18px; padding: 0; max-height: 120px; overflow: hidden;";
 
-  resultCard.append(row, list);
+  const summaryBox = document.createElement("div");
+  summaryBox.id = "analysisSummary";
+  summaryBox.style.cssText =
+    "margin-top: 10px; padding: 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; display: none; white-space: pre-wrap; line-height: 1.5;";
+
+  const linkWrap = document.createElement("div");
+  linkWrap.id = "analysisLinkWrap";
+  linkWrap.style.cssText = "margin-top: 8px; display: none;";
+  const linkEl = document.createElement("a");
+  linkEl.id = "analysisFullLink";
+  linkEl.href = "#";
+  linkEl.target = "_blank";
+  linkEl.rel = "noreferrer noopener";
+  linkEl.textContent = "전체 결과 보기";
+  linkEl.style.cssText = "color: #58a6ff; text-decoration: underline; font-weight: 600;";
+  linkWrap.appendChild(linkEl);
+
+  resultCard.append(row, list, summaryBox, linkWrap);
   container.append(title, resultCard);
   document.body.appendChild(container);
 
-  const normalized = payload && typeof payload === "object" ? payload : {};
+  const normalized =
+    payload && typeof payload === "object"
+      ? { mode: payload.mode || "full", summary: "", fullLink: "", originalText: "", meta: {}, ...payload }
+      : { mode: "full", summary: "", fullLink: "", originalText: "", meta: {}, bullets: [] };
   normalized.bullets = Array.isArray(normalized.bullets) ? normalized.bullets : [];
+  normalized.summary = typeof normalized.summary === "string" ? normalized.summary : "";
+  normalized.fullLink = typeof normalized.fullLink === "string" ? normalized.fullLink : "";
+  normalized.originalText = typeof normalized.originalText === "string" ? normalized.originalText : "";
+  normalized.meta = normalized.meta && typeof normalized.meta === "object" ? normalized.meta : {};
   updateAnalysisUI(normalized);
 
   function updateAnalysisUI(result) {
@@ -415,11 +581,44 @@ function injectOverlay(payload, fromCache) {
     const labelElInner = document.getElementById("riskLabel");
     const ul = document.getElementById("riskBullets");
     const meter = document.getElementById("riskMeter");
+    const summaryBoxEl = document.getElementById("analysisSummary");
+    const linkWrapEl = document.getElementById("analysisLinkWrap");
+    const linkEl = document.getElementById("analysisFullLink");
+    const modePillEl = document.getElementById("resultModePill");
     if (!resultCardEl || !scoreElInner || !labelElInner || !ul || !meter) return;
 
     resultCardEl.classList.remove("d-none");
     scoreElInner.textContent = `${result.score}`;
     labelElInner.textContent = `위험도: ${result.label}`;
+
+    if (modePillEl) {
+      const free = result.mode === "free";
+      modePillEl.textContent = free ? "무료" : "전체";
+      modePillEl.style.background = free ? "rgba(240, 246, 252, 0.12)" : "rgba(88, 166, 255, 0.14)";
+      modePillEl.style.color = free ? "#f0f6fc" : "#58a6ff";
+    }
+
+    if (summaryBoxEl) {
+      if (result.summary) {
+        summaryBoxEl.textContent = result.summary;
+        summaryBoxEl.style.display = "block";
+      } else {
+        summaryBoxEl.style.display = "none";
+      }
+    }
+
+    if (linkWrapEl && linkEl) {
+      if (result.mode === "free" && result.fullLink) {
+        linkEl.href = result.fullLink;
+        linkEl.onclick = (e) => {
+          e.preventDefault();
+          chrome.runtime.sendMessage({ type: "OPEN_FULL_RESULT", url: result.fullLink, payload: result });
+        };
+        linkWrapEl.style.display = "block";
+      } else {
+        linkWrapEl.style.display = "none";
+      }
+    }
 
     if (meter) {
       const target = Math.max(0, Math.min(100, Number(result.score) || 0));
@@ -484,4 +683,49 @@ function injectOverlay(payload, fromCache) {
       ul.appendChild(li);
     });
   }
+
+}
+
+function openResultTab(url, payload) {
+  return new Promise((resolve) => {
+    if (!url) {
+      resolve(false);
+      return;
+    }
+
+    chrome.tabs.create({ url }, (tab) => {
+      if (!tab?.id) {
+        resolve(false);
+        return;
+      }
+
+      const applyPayload = () => {
+        chrome.scripting
+          .executeScript({
+            target: { tabId: tab.id },
+            func: (data) => {
+              try {
+                sessionStorage.setItem("analysisPayload", JSON.stringify(data || {}));
+              } catch (err) {
+                // ignore storage errors
+              }
+            },
+            args: [payload]
+          })
+          .catch(() => {});
+      };
+
+      applyPayload();
+
+      const listener = (tabId, info) => {
+        if (tabId === tab.id && info.status === "complete") {
+          applyPayload();
+          chrome.tabs.onUpdated.removeListener(listener);
+        }
+      };
+
+      chrome.tabs.onUpdated.addListener(listener);
+      resolve(true);
+    });
+  });
 }

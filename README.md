@@ -22,5 +22,6 @@ MV3 Chrome extension for 개인정보와드 서비스.
 ## Notes
 - Permissions: uses `tabs`, `scripting`, and `storage`; host permissions are `<all_urls>` for broad coverage. Narrow them if you prefer.
 - Caching: results are stored in `chrome.storage.local` keyed by a SHA-256 hash of the extracted text (truncated to 5k characters before hashing).
+- Free mode: enable it in the popup Settings to send requests to `/api/checkSummary`, show a short result plus “full view” link in overlays, and switch the News tab to simple hyperlinks instead of the embedded reel.
 - Overlay: injected into the top-left of the page; it replaces any previous overlay and auto-removes after a few seconds.
 - Icons: `manifest.json` references the placeholder PNGs in `assets/`. Replace them with your own (convert `favicon.webp` to 16/48/128 PNGs) if you prefer your brand.
